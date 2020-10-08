@@ -78,6 +78,9 @@ uint32_t historicalTemps[4] = {0,0,0,0};
 #define TEMPERATURE_DETAILS    1
 #define OUTPUT_FREQ_Hz (6000UL)
 
+#define VERSION_MAJOR 1
+#define VERSION_MINOR 2
+
 #define WRIST_COMP 13  // Offset from wrist temp to internal temp
 #define OBJ_DETECT_THRESHOLD 28.5  // Degrees c to detect an object
 #define OBJ_LOW_TEMP_THRESHOLD 27  // Degrees c to detect an object
@@ -186,11 +189,21 @@ static void cryotimerSetup(void)
 /**************************************************************************//**
  * @brief LCD display for different application.
  *****************************************************************************/
+void displayVersionNumber(void)
+{
+  char str[13];
+  memset (str,0, sizeof(str));
+
+  sprintf(str,"V%d.%d",VERSION_MAJOR, VERSION_MINOR);
+  SegmentLCD_Write(str);
+}
+
+/**************************************************************************//**
+ * @brief LCD display for different application.
+ *****************************************************************************/
 void drawScreen(uint8_t app)
 {
   char str[13];
-
-  static uint8_t showVerCount = 0;
 
   switch (app) {
     // Show raw temperature as it comes in (for debug purposes)
@@ -224,12 +237,7 @@ void drawScreen(uint8_t app)
 	  }
       str[8] = '\0';                            // Truncate to display size.
 
-      if (showVerCount < 20)
-      {
-    	  SegmentLCD_Write("V1.2");
-    	  showVerCount++;
-      }
-      else if (displayWait)
+      if (displayWait)
       {
     	 if (adapting)
     		 SegmentLCD_Write("SetWrist");
@@ -262,6 +270,180 @@ void drawScreen(uint8_t app)
     default:
       break;
   }
+}
+
+/**************************************************************************//**
+ * @brief  Reset temperature state info
+ *****************************************************************************/
+
+void resetTemperatureState (void)
+{
+	stableTempCount = 0;
+    adaptiveTempAdjust = 0;
+	adaptiveTempCount = 0;
+	tempDisplayedCount = 0;
+	adapting = false;
+	displayTemp = false;
+	displayMeasure = false;
+	displayWait = true;
+}
+
+/**************************************************************************//**
+ * @brief  handleTemperatureReadings - Main State machine for the temp
+ * monitor
+ *****************************************************************************/
+
+void handleTemperatureReadings (void)
+{
+	historicalTemps[3] = historicalTemps[2];
+	historicalTemps[2] = historicalTemps[1];
+	historicalTemps[1] = historicalTemps[0];
+	historicalTemps[0] = objTemp;
+
+	if ((adaptiveTempCount > 0) && (objTemp < OBJ_LOW_TEMP_THRESHOLD)
+			&& (tempDisplayedCount == 0))
+	{
+		if (displayWait == false)
+		{
+			setGreenLed(false);
+			setRedLed(false);
+			setBlueLed(false);
+		}
+		adaptiveTempAdjust = 0;
+		adaptiveTempCount = 0;
+		adapting = false;
+	}
+
+	else if ((objTemp + adaptiveTempAdjust) < OBJ_DETECT_THRESHOLD
+			&& (objTemp > OBJ_LOW_TEMP_THRESHOLD) && (tempDisplayedCount == 0))
+	{
+		if (adapting == false)
+		{
+			setGreenLed(false);
+			setRedLed(false);
+			setBlueLed(true);
+			adapting = true;
+		}
+		Delay(20);
+		adaptiveTempCount++;
+		if (adaptiveTempCount > 25)
+		{
+			adaptiveTempAdjust += 2;
+			adaptiveTempCount = 0;
+		}
+	}
+
+	// See if an object is close to the sensor (temperature based)
+	else if ((objTemp + adaptiveTempAdjust) > OBJ_DETECT_THRESHOLD) // in celcius - ~90 f
+	{
+		BSP_LedToggle(0);
+		if (stableTempCount < NUM_READINGS_NEEDED)
+		{
+			setGreenLed(true);
+			setRedLed(true);
+			setBlueLed(false);
+
+			// Waiting for a stable measurement
+			// Do a couple of quick beeps to show progress
+			CMU_ClockEnable(cmuClock_TIMER0, true);
+			Delay(20);
+			CMU_ClockEnable(cmuClock_TIMER0, false);
+			Delay(20);
+			displayTemp = false;
+			displayMeasure = true;
+			displayWait = false;
+
+			// wait for stabilization of 1 second
+			if (abs(
+					historicalTemps[0]
+							- historicalTemps[1]< TEMP_VARIATION_ALLOWED)
+					&& abs(
+							historicalTemps[0]
+									- historicalTemps[2]< TEMP_VARIATION_ALLOWED)
+					&& abs(
+							historicalTemps[0]
+									- historicalTemps[3]< TEMP_VARIATION_ALLOWED))
+			{
+				stableTempCount++;
+
+				// If enough stable measurements in a row received, lock the temperature
+				// And display the results
+				if (stableTempCount >= NUM_READINGS_NEEDED)
+				{
+					lockedTemp = objTemp;
+					longBeep = true;
+					CMU_ClockEnable(cmuClock_TIMER0, true); // Turn on the beep
+					if (((lockedTemp * 9) / 5 + 32 + WRIST_COMP) > FEVER_TEMP)
+					{
+						// FEVER!  Red LED, long buzz
+						setGreenLed(false);
+						setRedLed(true);
+						setBlueLed(false);
+						longCount = 20;  // how long to buzz for
+					}
+					else
+					{
+						// Normal temperature.  Green LED, short buzz
+						setGreenLed(true);
+						setRedLed(false);
+						setBlueLed(false);
+						longCount = 2;  // how long to buzz for
+					}
+				}
+			}
+			else
+			{
+				// The temperature has not stabilized
+				stableTempCount = 0;
+			}
+		}
+		else
+		{
+			// Stable measurement achieved previously
+			// So keep displaying this until the display count
+			// expires
+			BSP_LedSet(0);
+			displayTemp = true;
+			displayMeasure = false;
+			displayWait = false;
+
+			tempDisplayedCount++;
+
+			if (tempDisplayedCount > 20)
+			{
+				// Done displaying - go back to idle
+				// to wait for the next measurement
+				resetTemperatureState();
+			}
+		}
+	}
+	else  // Temperature is below object detect, so nothing in range
+	{
+		if (tempDisplayedCount > 0)
+		{
+			// Keep displaying the stable temperature for a while
+			tempDisplayedCount++;
+			displayTemp = true;
+			displayMeasure = false;
+			displayWait = false;
+
+			if (tempDisplayedCount > 15)
+			{
+				resetTemperatureState();
+			}
+		}
+		else
+		{
+			// Done displaying the stable temperature
+			// Go back to idle, await next measurement
+			setGreenLed(false);
+			setRedLed(false);
+			setBlueLed(false);
+
+			BSP_LedClear(0);
+			resetTemperatureState();
+		}
+	}
 }
 
 /**************************************************************************//**
@@ -337,6 +519,7 @@ int main(void)
 
   // Enable LCD without voltage boost, use LFRCO as LCD clock source
   SegmentLCD_Init(false);
+  displayVersionNumber();  // Display version # on LCD
 
   // Setup CRYOTIMER to give an interrupt once per second
   cryotimerSetup();
@@ -380,171 +563,7 @@ int main(void)
       read_temperature_and_object_temperature(&ambTemp, &objTemp);
       appRhtTempData = objTemp;
 
-      historicalTemps[3] = historicalTemps[2];
-      historicalTemps[2] = historicalTemps[1];
-      historicalTemps[1] = historicalTemps[0];
-      historicalTemps[0] = objTemp;
-
-      if ((adaptiveTempCount > 0) &&
-    		  (objTemp < OBJ_LOW_TEMP_THRESHOLD) &&
-			  (tempDisplayedCount == 0))
-      {
-    	  if (displayWait == false)
-    	  {
-    		  setGreenLed (false);
-    		  setRedLed (false);
-    		  setBlueLed (false);
-    	  }
-    	  adaptiveTempAdjust = 0;
-    	  adaptiveTempCount = 0;
-    	  adapting = false;
-      }
-
-      else if ((objTemp + adaptiveTempAdjust) < OBJ_DETECT_THRESHOLD &&
-    		  (objTemp > OBJ_LOW_TEMP_THRESHOLD) &&
-			  (tempDisplayedCount == 0))
-      {
-    	  if (adapting == false)
-    	  {
-    		  setGreenLed (false);
-    		  setRedLed (false);
-    		  setBlueLed (true);
-    		  adapting = true;
-    	  }
-    	  Delay(20);
-    	  adaptiveTempCount++;
-    	  if (adaptiveTempCount > 25) {
-    		  adaptiveTempAdjust += 2;
-    		  adaptiveTempCount = 0;
-    	  }
-      }
-
-      // See if an object is close to the sensor (temperature based)
-      else if ((objTemp + adaptiveTempAdjust) > OBJ_DETECT_THRESHOLD)  // in celcius - ~90 f
-      {
-         BSP_LedToggle(0);
-         if (stableTempCount < NUM_READINGS_NEEDED)
-         {
-        	setGreenLed (true);
-        	setRedLed (true);
-        	setBlueLed (false);
-
-            // Waiting for a stable measurement
-            // Do a couple of quick beeps to show progress
-            CMU_ClockEnable(cmuClock_TIMER0, true);
-            Delay(20);
-            CMU_ClockEnable(cmuClock_TIMER0, false);
-            Delay(20);
-            displayTemp = false;
-            displayMeasure = true;
-            displayWait = false;
-
-            // wait for stabilization of 1 second
-            if (abs(historicalTemps[0] - historicalTemps[1] < TEMP_VARIATION_ALLOWED) &&
-                  abs(historicalTemps[0] - historicalTemps[2] < TEMP_VARIATION_ALLOWED) &&
-                  abs(historicalTemps[0] - historicalTemps[3] < TEMP_VARIATION_ALLOWED))
-            {
-               stableTempCount++;
-
-               // If enough stable measurements in a row received, lock the temperature
-               // And display the results
-               if (stableTempCount >= NUM_READINGS_NEEDED)
-               {
-                  lockedTemp = objTemp;
-                  longBeep = true;
-                  CMU_ClockEnable(cmuClock_TIMER0, true); // Turn on the beep
-                  if (((lockedTemp * 9) / 5 + 32 + WRIST_COMP) > FEVER_TEMP)
-                  {
-                	 // FEVER!  Red LED, long buzz
-                	 setGreenLed (false);
-                	 setRedLed (true);
-                	 setBlueLed (false);
-                     longCount = 20;  // how long to buzz for
-                  }
-                  else
-                  {
-                	 // Normal temperature.  Green LED, short buzz
-                 	 setGreenLed (true);
-                 	 setRedLed (false);
-                 	 setBlueLed (false);
-                     longCount = 2;  // how long to buzz for
-                  }
-               }
-            }
-            else
-            {
-               // The temperature has not stabilized
-               stableTempCount = 0;
-            }
-         }
-         else
-         {
-            // Stable measurement achieved previously
-        	// So keep displaying this until the display count
-        	// expires
-            BSP_LedSet(0);
-            displayTemp = true;
-            displayMeasure = false;
-            displayWait = false;
-
-            tempDisplayedCount++;
-
-            if (tempDisplayedCount > 20)
-            {
-               // Done displaying - go back to idle
-               // to wait for the next measurement
-               stableTempCount = 0;
-               adaptiveTempAdjust = 0;
-               adaptiveTempCount = 0;
-               tempDisplayedCount = 0;
-               adapting = false;
-               displayTemp = false;
-               displayMeasure = false;
-               displayWait = true;
-            }
-         }
-      }
-      else  // Temperature is below object detect, so nothing in range
-      {
-         if (tempDisplayedCount > 0)
-         {
-            // Keep displaying the stable temperature for a while
-            tempDisplayedCount++;
-            displayTemp = true;
-            displayMeasure = false;
-            displayWait = false;
-
-            if (tempDisplayedCount > 15)
-            {
-               stableTempCount = 0;
-               adaptiveTempAdjust = 0;
-               adaptiveTempCount = 0;
-               tempDisplayedCount = 0;
-               adapting = false;
-               displayTemp = false;
-               displayMeasure = false;
-               displayWait = true;
-            }
-         }
-         else
-         {
-            // Done displaying the stable temperature
-        	// Go back to idle, await next measurement
-        	setGreenLed (false);
-        	setRedLed (false);
-        	setBlueLed (false);
-
-            BSP_LedClear(0);
-            stableTempCount = 0;
-            adaptiveTempAdjust = 0;
-            adaptiveTempCount = 0;
-            tempDisplayedCount = 0;
-            adapting = false;
-            displayTemp = false;
-            displayMeasure = false;
-            displayWait = true;
-         }
-      }
+      handleTemperatureReadings();  // main temp state machine
     }
 
     // Push buttons event handling
