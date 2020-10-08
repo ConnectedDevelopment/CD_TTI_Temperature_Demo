@@ -79,7 +79,7 @@ uint32_t historicalTemps[4] = {0,0,0,0};
 #define OUTPUT_FREQ_Hz (6000UL)
 
 #define VERSION_MAJOR 1
-#define VERSION_MINOR 2
+#define VERSION_MINOR 3
 
 #define WRIST_COMP 13  // Offset from wrist temp to internal temp
 #define OBJ_DETECT_THRESHOLD 28.5  // Degrees c to detect an object
