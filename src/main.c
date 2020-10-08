@@ -84,6 +84,7 @@ uint32_t historicalTemps[4] = {0,0,0,0};
 #define WRIST_COMP 13  // Offset from wrist temp to internal temp
 #define OBJ_DETECT_THRESHOLD 28.5  // Degrees c to detect an object
 #define OBJ_LOW_TEMP_THRESHOLD 27  // Degrees c to detect an object
+#define ADAPTIVE_TEMP_COUNT 10 // How long to wait before adjusting the temp threshold
 #define FEVER_TEMP 100.4  // temperature needed to trigger a fever notification
 #define NUM_READINGS_NEEDED 4
 #define TEMP_VARIATION_ALLOWED 1 // NUM_READINGS_NEEDED
@@ -317,6 +318,11 @@ void handleTemperatureReadings (void)
 	else if ((objTemp + adaptiveTempAdjust) < OBJ_DETECT_THRESHOLD
 			&& (objTemp > OBJ_LOW_TEMP_THRESHOLD) && (tempDisplayedCount == 0))
 	{
+		// Adaptive adjustment - for the cold wrist people out there.  If a
+		// less than normal temperature is detected, wait for a bit (while displaying
+		// "setWrist" in hopes they move the wrist closer for a good measurement.
+		// If still "cold" after a bit, start adjusting the threshold temperature down
+		// for an easier detect.
 		if (adapting == false)
 		{
 			setGreenLed(false);
@@ -326,7 +332,7 @@ void handleTemperatureReadings (void)
 		}
 		Delay(20);
 		adaptiveTempCount++;
-		if (adaptiveTempCount > 25)
+		if (adaptiveTempCount > ADAPTIVE_TEMP_COUNT)
 		{
 			adaptiveTempAdjust += 2;
 			adaptiveTempCount = 0;
