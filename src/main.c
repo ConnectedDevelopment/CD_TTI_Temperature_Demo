@@ -64,7 +64,10 @@ bool btn0Pressed = false;
 bool btn1Pressed = false;
 
 uint16_t stableTempCount = 0;
+uint16_t adaptiveTempCount = 0;
+uint16_t adaptiveTempAdjust = 0;
 uint16_t tempDisplayedCount = 0;
+bool adapting = false;
 bool displayWait = true;
 bool displayTemp = false;
 bool displayMeasure = false;
@@ -77,6 +80,7 @@ uint32_t historicalTemps[4] = {0,0,0,0};
 
 #define WRIST_COMP 13  // Offset from wrist temp to internal temp
 #define OBJ_DETECT_THRESHOLD 28.5  // Degrees c to detect an object
+#define OBJ_LOW_TEMP_THRESHOLD 27  // Degrees c to detect an object
 #define FEVER_TEMP 100.4  // temperature needed to trigger a fever notification
 #define NUM_READINGS_NEEDED 4
 #define TEMP_VARIATION_ALLOWED 1 // NUM_READINGS_NEEDED
@@ -114,11 +118,11 @@ static void setRedLed(bool on)
 {
 	if (on == true)
 	{
-		GPIO_PinModeSet(gpioPortC, 0, gpioModePushPull, 1);
+		GPIO_PinOutClear(gpioPortC, 8);
 	}
 	else
 	{
-		GPIO_PinModeSet(gpioPortC, 0, gpioModePushPull, 0);
+		GPIO_PinOutSet(gpioPortC, 8);
 	}
 }
 
@@ -130,11 +134,27 @@ static void setGreenLed(bool on)
 {
 	if (on == true)
 	{
-		GPIO_PinModeSet(gpioPortC, 8, gpioModePushPull, 1);
+		GPIO_PinOutClear(gpioPortC, 0);
 	}
 	else
 	{
-		GPIO_PinModeSet(gpioPortC, 8, gpioModePushPull, 0);
+		GPIO_PinOutSet(gpioPortC, 0);
+	}
+}
+
+/******************************************************************************
+ * @brief Set the blue led on/ off
+ *****************************************************************************/
+
+static void setBlueLed(bool on)
+{
+	if (on == true)
+	{
+		GPIO_PinOutClear(gpioPortA, 12);
+	}
+	else
+	{
+		GPIO_PinOutSet(gpioPortA, 12);
 	}
 }
 
@@ -170,6 +190,8 @@ void drawScreen(uint8_t app)
 {
   char str[13];
 
+  static uint8_t showVerCount = 0;
+
   switch (app) {
     // Show raw temperature as it comes in (for debug purposes)
     case TEMPERATURE_DETAILS:
@@ -192,14 +214,36 @@ void drawScreen(uint8_t app)
 
     // The "production" demo -
     case TEMPERATURE_DEMO:
-      sprintf(str, "T %.2f", ((lockedTemp * 9) / 5 + 32 + WRIST_COMP));  // add comp for wrist
+      //sprintf(str, "T %.2f", ((lockedTemp * 9) / 5 + 32 + WRIST_COMP));  // add comp for wrist
+      if (((lockedTemp * 9) / 5 + 32 + WRIST_COMP) > FEVER_TEMP)
+	  {
+		sprintf (str,"FEVER");
+	  } else
+	  {
+		sprintf(str,"NORMAL");
+	  }
       str[8] = '\0';                            // Truncate to display size.
-      if (displayWait)
-         SegmentLCD_Write("READY");
+
+      if (showVerCount < 20)
+      {
+    	  SegmentLCD_Write("V1.2");
+    	  showVerCount++;
+      }
+      else if (displayWait)
+      {
+    	 if (adapting)
+    		 SegmentLCD_Write("SetWrist");
+    	 else
+    		 SegmentLCD_Write("READY");
+      }
       else if (displayMeasure)
+      {
          SegmentLCD_Write("MEASURE");
+      }
       else
+      {
          SegmentLCD_Write(str);
+      }
 
       SegmentLCD_Symbol(LCD_SYMBOL_S13, true);
       SegmentLCD_Symbol(LCD_SYMBOL_S14, false);
@@ -283,9 +327,13 @@ int main(void)
   // Initialize LED driver
   BSP_LedsInit();
 
-  // Initialize the Red and Green LEDs
-  setGreenLed (true);
-  setRedLed (true);
+  GPIO_PinModeSet(gpioPortC, 0, gpioModePushPull, 1);
+  GPIO_PinModeSet(gpioPortC, 8, gpioModePushPull, 1);
+  GPIO_PinModeSet(gpioPortA, 12, gpioModePushPull, 1);
+
+  setGreenLed (false);
+  setRedLed (false);
+  setBlueLed (false);
 
   // Enable LCD without voltage boost, use LFRCO as LCD clock source
   SegmentLCD_Init(false);
@@ -337,14 +385,49 @@ int main(void)
       historicalTemps[1] = historicalTemps[0];
       historicalTemps[0] = objTemp;
 
+      if ((adaptiveTempCount > 0) &&
+    		  (objTemp < OBJ_LOW_TEMP_THRESHOLD) &&
+			  (tempDisplayedCount == 0))
+      {
+    	  if (displayWait == false)
+    	  {
+    		  setGreenLed (false);
+    		  setRedLed (false);
+    		  setBlueLed (false);
+    	  }
+    	  adaptiveTempAdjust = 0;
+    	  adaptiveTempCount = 0;
+    	  adapting = false;
+      }
+
+      else if ((objTemp + adaptiveTempAdjust) < OBJ_DETECT_THRESHOLD &&
+    		  (objTemp > OBJ_LOW_TEMP_THRESHOLD) &&
+			  (tempDisplayedCount == 0))
+      {
+    	  if (adapting == false)
+    	  {
+    		  setGreenLed (false);
+    		  setRedLed (false);
+    		  setBlueLed (true);
+    		  adapting = true;
+    	  }
+    	  Delay(20);
+    	  adaptiveTempCount++;
+    	  if (adaptiveTempCount > 25) {
+    		  adaptiveTempAdjust += 2;
+    		  adaptiveTempCount = 0;
+    	  }
+      }
+
       // See if an object is close to the sensor (temperature based)
-      if (objTemp > OBJ_DETECT_THRESHOLD)  // in celcius - ~90 f
+      else if ((objTemp + adaptiveTempAdjust) > OBJ_DETECT_THRESHOLD)  // in celcius - ~90 f
       {
          BSP_LedToggle(0);
          if (stableTempCount < NUM_READINGS_NEEDED)
          {
-        	setGreenLed (false);
-        	setRedLed (false);
+        	setGreenLed (true);
+        	setRedLed (true);
+        	setBlueLed (false);
 
             // Waiting for a stable measurement
             // Do a couple of quick beeps to show progress
@@ -375,6 +458,7 @@ int main(void)
                 	 // FEVER!  Red LED, long buzz
                 	 setGreenLed (false);
                 	 setRedLed (true);
+                	 setBlueLed (false);
                      longCount = 20;  // how long to buzz for
                   }
                   else
@@ -382,6 +466,7 @@ int main(void)
                 	 // Normal temperature.  Green LED, short buzz
                  	 setGreenLed (true);
                  	 setRedLed (false);
+                 	 setBlueLed (false);
                      longCount = 2;  // how long to buzz for
                   }
                }
@@ -409,7 +494,10 @@ int main(void)
                // Done displaying - go back to idle
                // to wait for the next measurement
                stableTempCount = 0;
+               adaptiveTempAdjust = 0;
+               adaptiveTempCount = 0;
                tempDisplayedCount = 0;
+               adapting = false;
                displayTemp = false;
                displayMeasure = false;
                displayWait = true;
@@ -429,7 +517,10 @@ int main(void)
             if (tempDisplayedCount > 15)
             {
                stableTempCount = 0;
+               adaptiveTempAdjust = 0;
+               adaptiveTempCount = 0;
                tempDisplayedCount = 0;
+               adapting = false;
                displayTemp = false;
                displayMeasure = false;
                displayWait = true;
@@ -439,10 +530,16 @@ int main(void)
          {
             // Done displaying the stable temperature
         	// Go back to idle, await next measurement
-        	setGreenLed (true);
-        	setRedLed (true);
+        	setGreenLed (false);
+        	setRedLed (false);
+        	setBlueLed (false);
 
             BSP_LedClear(0);
+            stableTempCount = 0;
+            adaptiveTempAdjust = 0;
+            adaptiveTempCount = 0;
+            tempDisplayedCount = 0;
+            adapting = false;
             displayTemp = false;
             displayMeasure = false;
             displayWait = true;
